@@ -227,6 +227,11 @@ public:
         return (StatementNode *)this;
     }
 
+    bool isFunctionExpression()
+    {
+        return type() == ASTNodeType::FunctionExpression;
+    }
+
     bool isLiteral()
     {
         return type() == ASTNodeType::Literal;

@@ -151,6 +151,7 @@ struct Context : public gc {
     bool inWith : 1;
     bool inLoop : 1;
     bool strict : 1;
+    IdentifierNode* functionNameKey;
     RefPtr<Scanner::ScannerResult> firstCoverInitializedNameError;
     std::vector<std::pair<AtomicString, size_t>> labelSet; // <LabelString, with statement count>
     std::vector<FunctionDeclarationNode*> functionDeclarationsInDirectCatchScope;
@@ -395,6 +396,7 @@ public:
         this->context->inWith = false;
         this->context->inLoop = false;
         this->context->strict = this->sourceType == Module;
+        this->context->functionNameKey = nullptr;
 
         this->baseMarker.index = startIndex;
         this->baseMarker.lineNumber = this->scanner->lineNumber;
@@ -1403,7 +1405,7 @@ public:
 
     // ECMA-262 12.2.6 Object Initializer
 
-    PassRefPtr<Node> parsePropertyMethod(ParseFormalParametersResult& params)
+    PassRefPtr<Node> parsePropertyMethod(ParseFormalParametersResult& params, AtomicString id = AtomicString())
     {
         bool previousInArrowFunction = this->context->inArrowFunction;
 
@@ -1411,7 +1413,7 @@ public:
         this->context->isAssignmentTarget = false;
         this->context->isBindingElement = false;
 
-        pushScopeContext(params.params, AtomicString());
+        pushScopeContext(params.params, id);
         extractNamesFromFunctionParams(params.params);
         const bool previousStrict = this->context->strict;
         PassRefPtr<Node> body = this->isolateCoverGrammar(&Parser::parseFunctionSourceElements);
@@ -1427,7 +1429,7 @@ public:
         return body;
     }
 
-    PassRefPtr<FunctionExpressionNode> parsePropertyMethodFunction()
+    PassRefPtr<FunctionExpressionNode> parsePropertyMethodFunction(AtomicString id = AtomicString())
     {
         const bool isGenerator = false;
         const bool previousAllowYield = this->context->allowYield;
@@ -1435,10 +1437,10 @@ public:
         this->expect(LeftParenthesis);
         MetaNode node = this->createNode();
         ParseFormalParametersResult params = this->parseFormalParameters();
-        RefPtr<Node> method = this->parsePropertyMethod(params);
+        RefPtr<Node> method = this->parsePropertyMethod(params, id);
         this->context->allowYield = previousAllowYield;
 
-        return this->finalize(node, new FunctionExpressionNode(AtomicString(), std::move(params.params), method.get(), popScopeContext(node), isGenerator));
+        return this->finalize(node, new FunctionExpressionNode(id, std::move(params.params), method.get(), popScopeContext(node), isGenerator));
     }
 
     PassRefPtr<Node> parseObjectPropertyKey()
@@ -1700,7 +1702,15 @@ public:
                 this->nextToken();
 
                 if (isParse) {
-                    valueNode = this->inheritCoverGrammar(&Parser::parseAssignmentExpression);
+                    if (keyNode->isIdentifier()) {
+                        IdentifierNode* saveName;
+                        saveName = this->context->functionNameKey;
+                        this->context->functionNameKey = keyNode->asIdentifier();
+                        valueNode = this->inheritCoverGrammar(&Parser::parseAssignmentExpression);
+                        this->context->functionNameKey = saveName;
+                    } else {
+                        valueNode = this->inheritCoverGrammar(&Parser::parseAssignmentExpression);
+                    }
                 } else {
                     this->scanInheritCoverGrammar(&Parser::scanAssignmentExpression);
                 }
@@ -4122,7 +4132,9 @@ public:
         RefPtr<Node> init;
         if (this->match(Substitution)) {
             this->nextToken();
+            this->context->functionNameKey = (IdentifierNode*)id.get();
             init = this->isolateCoverGrammar(&Parser::parseAssignmentExpression);
+            if (!init->isFunctionExpression()) this->context->functionNameKey = nullptr;
         } else if (id->type() != Identifier && !options.inFor) {
             this->expect(Substitution);
         }
@@ -5650,13 +5662,18 @@ public:
             message = formalParameters.message;
         }
 
-        AtomicString fnName = id ? id->name() : AtomicString();
+        AtomicString fnName;
+        if (!id && this->context->functionNameKey) {
+            fnName = this->context->functionNameKey->name();
+        } else if (id) {
+            fnName = id->name();
+        }
 
         if (!isFunctionDeclaration) {
             pushScopeContext(params, fnName);
         }
 
-        if (id) {
+        if (id || this->context->functionNameKey) {
             scopeContexts.back()->insertName(fnName, isFunctionDeclaration);
             insertUsingName(fnName);
         }
@@ -5943,7 +5960,13 @@ public:
 
         if (kind == ClassElementNode::Kind::None && key && this->match(LeftParenthesis)) {
             kind = ClassElementNode::Kind::Method;
-            value = this->parsePropertyMethodFunction();
+            if (key->isIdentifier()) {
+                scopeContexts.back()->insertName(key->asIdentifier()->name(), true);
+                insertUsingName(key->asIdentifier()->name());
+                value = this->parsePropertyMethodFunction(key->asIdentifier()->name());
+            } else {
+                value = this->parsePropertyMethodFunction();
+            }
         }
 
         if (kind == ClassElementNode::Kind::None) {
